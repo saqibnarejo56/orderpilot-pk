@@ -1,36 +1,105 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# OrderPilot PK
 
-## Getting Started
+OrderPilot PK is a multi-tenant SaaS platform designed for Instagram and WhatsApp sellers to manage products, inventory, customers, and orders from one centralized dashboard.
 
-First, run the development server:
+## Current Status
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+The Product Management module is complete and functional. The Orders module is currently under development.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Features
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- Secure seller signup and login
+- Supabase Authentication
+- Protected dashboard routes
+- Seller-specific store profiles
+- Product creation, editing, and deletion
+- SKU, category, pricing, and stock management
+- Low-stock alerts
+- Product status management
+- Product image upload and preview
+- Image replacement and removal
+- Automatic image cleanup after replacement or product deletion
+- Seller-specific data isolation using Supabase Row Level Security
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Tech Stack
 
-## Learn More
+- Next.js
+- React
+- TypeScript
+- Tailwind CSS
+- Supabase Authentication
+- Supabase PostgreSQL
+- Supabase Storage
+- Supabase Row Level Security
+- Git and GitHub
 
-To learn more about Next.js, take a look at the following resources:
+## Environment Variables
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Create a `.env.local` file in the project root using `.env.example`.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Required variables:
 
-## Deploy on Vercel
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Never commit real environment variable values to GitHub.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Local Setup
+
+1. Clone the repository:
+
+   `git clone https://github.com/saqibnarejo56/orderpilot-pk.git`
+
+2. Open the project folder:
+
+   `cd orderpilot-pk`
+
+3. Install dependencies:
+
+   `npm install`
+
+4. Create `.env.local` and add your Supabase credentials.
+
+5. Start the development server:
+
+   `npm run dev`
+
+6. Open:
+
+   `http://localhost:3000`
+
+## Production Build
+
+Run:
+
+`npm run build`
+
+The current project passes the Next.js production build and TypeScript validation.
+
+## Roadmap
+
+- [x] Seller authentication
+- [x] Store profile connection
+- [x] Product catalogue
+- [x] Product CRUD operations
+- [x] Stock and low-stock management
+- [x] Product image management
+- [x] Supabase Storage cleanup
+- [x] Seller-specific Row Level Security
+- [ ] Customer management
+- [ ] Order creation
+- [ ] Multi-product orders
+- [ ] Order status workflow
+- [ ] Automatic stock deduction
+- [ ] COD and payment tracking
+- [ ] Returns management
+- [ ] Dashboard analytics
+- [ ] Production deployment
+
+## Purpose
+
+OrderPilot PK aims to help small online sellers replace manual order tracking through WhatsApp chats, Instagram messages, and spreadsheets with a structured business management system.
+
+## Author
+
+**Saqib Narejo**
