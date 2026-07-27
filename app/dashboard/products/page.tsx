@@ -1,6 +1,10 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import ProductsRealtimeRefresh from './products-realtime-refresh';
+
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 function formatCurrency(value: number | string) {
   return new Intl.NumberFormat('en-PK', {
@@ -103,6 +107,8 @@ export default async function ProductsPage() {
 
   return (
     <main className="min-h-screen bg-[#F6F5F1] text-[#17191C]">
+      <ProductsRealtimeRefresh />
+
       <header className="border-b border-[#D9D7D0] bg-white">
         <div className="mx-auto flex h-20 max-w-[1320px] items-center justify-between px-5 sm:px-8 lg:px-10">
           <Link href="/dashboard" className="flex items-center gap-3">

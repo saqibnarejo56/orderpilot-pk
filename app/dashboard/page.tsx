@@ -2,6 +2,51 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import LogoutButton from './logout-button';
+type DashboardOrder = {
+  id: string;
+  order_number: string;
+  customer_name: string;
+  status: string;
+  payment_status: string;
+  total_amount: number | string;
+  paid_amount: number | string;
+  refunded_amount: number | string;
+  created_at: string;
+};
+
+type DashboardProduct = {
+  id: string;
+  status: string;
+  stock_quantity: number;
+};
+
+function formatCurrency(value: number | string) {
+  return new Intl.NumberFormat('en-PK', {
+    style: 'currency',
+    currency: 'PKR',
+    maximumFractionDigits: 0,
+  }).format(Number(value) || 0);
+}
+
+function getOrderStatusStyles(status: string) {
+  if (status === 'delivered') {
+    return 'bg-emerald-100 text-emerald-800';
+  }
+
+  if (status === 'cancelled' || status === 'returned') {
+    return 'bg-red-100 text-red-800';
+  }
+
+  if (status === 'confirmed' || status === 'processing') {
+    return 'bg-blue-100 text-blue-800';
+  }
+
+  if (status === 'shipped') {
+    return 'bg-cyan-100 text-cyan-800';
+  }
+
+  return 'bg-amber-100 text-amber-800';
+}
 export default async function DashboardPage() {
   const supabase = await createClient();
 
@@ -16,10 +61,71 @@ export default async function DashboardPage() {
   const fullName =
     typeof user.user_metadata?.full_name === 'string' ? user.user_metadata.full_name : 'Seller';
 
-  const storeName =
-    typeof user.user_metadata?.store_name === 'string'
-      ? user.user_metadata.store_name
-      : 'Your Store';
+  const { data: store, error: storeError } = await supabase
+    .from('stores')
+    .select('id, name')
+    .eq('owner_id', user.id)
+    .single();
+
+  if (storeError || !store) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#F6F5F1] px-5">
+        <section className="w-full max-w-lg rounded-2xl border border-[#D9D7D0] bg-white p-8 text-center">
+          <h1 className="text-2xl font-black">Store could not be loaded</h1>
+
+          <p className="mt-3 text-sm text-[#666963]">Your store record could not be found.</p>
+        </section>
+      </main>
+    );
+  }
+
+  const [{ data: orderRows, error: ordersError }, { data: productRows, error: productsError }] =
+    await Promise.all([
+      supabase
+        .from('orders')
+        .select(
+          `
+        id,
+        order_number,
+        customer_name,
+        status,
+        payment_status,
+        total_amount,
+        paid_amount,
+        refunded_amount,
+        created_at
+      `
+        )
+        .eq('store_id', store.id)
+        .order('created_at', { ascending: false }),
+
+      supabase.from('products').select('id, status, stock_quantity').eq('store_id', store.id),
+    ]);
+
+  const orders = (orderRows ?? []) as DashboardOrder[];
+  const products = (productRows ?? []) as DashboardProduct[];
+
+  const totalOrders = orders.length;
+
+  const pendingOrders = orders.filter((order) => order.status === 'pending').length;
+
+  const revenue = orders.reduce((total, order) => {
+    if (order.status === 'cancelled' || order.status === 'returned') {
+      return total;
+    }
+
+    return total + Math.max(Number(order.paid_amount || 0) - Number(order.refunded_amount || 0), 0);
+  }, 0);
+
+  const availableProducts = products.filter(
+    (product) => product.status === 'active' && Number(product.stock_quantity) > 0
+  ).length;
+
+  const recentOrders = orders.slice(0, 5);
+
+  const dashboardError = ordersError?.message || productsError?.message || '';
+
+  const storeName = store.name;
 
   return (
     <main className="min-h-screen bg-[#F6F5F1] text-[#17191C]">
@@ -61,12 +167,32 @@ export default async function DashboardPage() {
           </div>
 
           <nav className="mt-4 space-y-1 text-sm font-semibold">
-            <div className="rounded-xl bg-[#EAF1ED] px-4 py-3 text-[#173F36]">Overview</div>
+            <Link
+              href="/dashboard"
+              className="block rounded-xl bg-[#EAF1ED] px-4 py-3 text-[#173F36]"
+            >
+              Overview
+            </Link>
 
-            {['Orders', 'Products', 'Customers', 'Inventory', 'Returns'].map((item) => (
+            <Link
+              href="/dashboard/orders"
+              className="block rounded-xl px-4 py-3 text-[#666963] transition hover:bg-[#F3F2EE]"
+            >
+              Orders
+            </Link>
+
+            <Link
+              href="/dashboard/products"
+              className="block rounded-xl px-4 py-3 text-[#666963] transition hover:bg-[#F3F2EE]"
+            >
+              Products
+            </Link>
+
+            {['Customers', 'Inventory', 'Returns'].map((item) => (
               <div
                 key={item}
-                className="rounded-xl px-4 py-3 text-[#666963] transition hover:bg-[#F3F2EE]"
+                className="cursor-not-allowed rounded-xl px-4 py-3 text-[#A0A29E]"
+                title="Coming soon"
               >
                 {item}
               </div>
@@ -90,10 +216,10 @@ export default async function DashboardPage() {
 
           <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {[
-              ['Total orders', '0'],
-              ['Pending orders', '0'],
-              ['Revenue', 'PKR 0'],
-              ['Available products', '0'],
+              ['Total orders', totalOrders.toString()],
+              ['Pending orders', pendingOrders.toString()],
+              ['Revenue', formatCurrency(revenue)],
+              ['Available products', availableProducts.toString()],
             ].map(([label, value]) => (
               <article key={label} className="rounded-2xl border border-[#D9D7D0] bg-white p-6">
                 <p className="text-xs font-semibold text-[#777A75]">{label}</p>
@@ -108,20 +234,64 @@ export default async function DashboardPage() {
               <div className="flex items-center justify-between border-b border-[#E2E0DA] pb-5">
                 <div>
                   <h2 className="text-lg font-black">Recent orders</h2>
+
                   <p className="mt-1 text-sm text-[#777A75]">
                     New customer orders will appear here.
                   </p>
                 </div>
               </div>
 
-              <div className="flex min-h-56 items-center justify-center text-center">
-                <div>
-                  <p className="text-sm font-black">No orders yet</p>
-                  <p className="mt-2 max-w-sm text-sm leading-6 text-[#777A75]">
-                    Add products and share your order form to receive your first customer order.
+              {dashboardError ? (
+                <div className="flex min-h-56 items-center justify-center text-center">
+                  <p className="text-sm font-bold text-red-700">
+                    Dashboard data could not be loaded.
                   </p>
                 </div>
-              </div>
+              ) : recentOrders.length === 0 ? (
+                <div className="flex min-h-56 items-center justify-center text-center">
+                  <div>
+                    <p className="text-sm font-black">No orders yet</p>
+
+                    <p className="mt-2 max-w-sm text-sm leading-6 text-[#777A75]">
+                      Add products and create your first customer order.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="divide-y divide-[#E2E0DA]">
+                  {recentOrders.map((order) => (
+                    <div
+                      key={order.id}
+                      className="flex flex-col gap-4 py-4 first:pt-5 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div>
+                        <p className="text-sm font-black">{order.order_number}</p>
+
+                        <p className="mt-1 text-xs text-[#777A75]">{order.customer_name}</p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <strong className="text-sm">{formatCurrency(order.total_amount)}</strong>
+
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-extrabold capitalize ${getOrderStatusStyles(
+                            order.status
+                          )}`}
+                        >
+                          {order.status}
+                        </span>
+
+                        <Link
+                          href={`/dashboard/orders/${order.id}`}
+                          className="text-sm font-extrabold text-[#175B46] hover:underline"
+                        >
+                          Manage
+                        </Link>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="rounded-2xl border border-[#D9D7D0] bg-[#173F36] p-6 text-white">
