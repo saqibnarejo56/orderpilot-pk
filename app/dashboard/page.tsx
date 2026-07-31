@@ -195,15 +195,19 @@ export default async function DashboardPage() {
               Customers
             </Link>
 
-            {['Inventory', 'Returns'].map((item) => (
-              <div
-                key={item}
-                className="cursor-not-allowed rounded-xl px-4 py-3 text-[#A0A29E]"
-                title="Coming soon"
-              >
-                {item}
-              </div>
-            ))}
+            <Link
+              href="/dashboard/inventory"
+              className="block rounded-xl px-4 py-3 text-[#434640] transition hover:bg-[#F3F2EE]"
+            >
+              Inventory
+            </Link>
+
+            <div
+              className="cursor-not-allowed rounded-xl px-4 py-3 text-[#A0A29E]"
+              title="Coming soon"
+            >
+              Returns
+            </div>
           </nav>
         </aside>
 

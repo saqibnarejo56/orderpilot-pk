@@ -15,6 +15,7 @@ The core Seller Application is functional.
 - Product management
 - Order management
 - Customer management
+- Inventory management
 - Payment and outstanding-balance tracking
 - Inventory-aware order processing
 - Seller-specific data security
@@ -99,6 +100,25 @@ The core Seller Application is functional.
 - Complete customer order history
 - Direct navigation from customers to their orders
 
+### Inventory Management
+
+- Live inventory overview
+- Total stock-unit calculation
+- Inventory value calculation using product cost price
+- Low-stock and out-of-stock monitoring
+- Manual stock increases and decreases
+- Mandatory adjustment reasons
+- Optional adjustment notes
+- Projected stock preview before saving
+- Negative-stock protection
+- Automatic opening-balance records
+- Automatic stock reservation from confirmed orders
+- Automatic stock restoration from pending, cancelled, and returned orders
+- Immutable inventory movement history
+- Product-specific inventory history pages
+- Order references connected to stock movements
+- Seller-specific inventory access through Row Level Security
+
 ### Security
 
 - Multi-tenant store architecture
@@ -150,7 +170,12 @@ The core Seller Application is functional.
 /dashboard/customers
 /dashboard/customers/[id]
 ```
+### Inventory
 
+```text
+/dashboard/inventory
+/dashboard/inventory/[id]
+```
 ## Tech Stack
 
 - Next.js 16
@@ -187,7 +212,24 @@ Current migration:
 ```text
 supabase/migrations/20260731032700_create_customers_module.sql
 ```
+The Inventory Module migration includes:
 
+- Inventory movement ledger
+- Opening-stock balance records
+- Automatic order stock reservation
+- Automatic stock release and restoration
+- Manual stock-adjustment RPC
+- Negative-stock protection
+- Product-level inventory audit history
+- Database indexes
+- Seller-specific Row Level Security
+- Immutable inventory records
+
+Inventory Module migration:
+
+```text
+supabase/migrations/20260801011600_create_inventory_module.sql
+```
 ## Environment Variables
 
 Create a `.env.local` file in the project root using `.env.example`.
@@ -274,8 +316,8 @@ npm run start
 - [x] Customer order history
 - [x] Customer financial summaries
 - [x] Seller-specific Row Level Security
-- [ ] Inventory history
-- [ ] Manual stock adjustments
+- [x] Inventory history
+- [x] Manual stock adjustments
 - [ ] Returns management
 - [ ] Store settings
 - [ ] Product variants
