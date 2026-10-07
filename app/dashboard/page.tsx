@@ -1,13 +1,19 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import {
+  buildReturnFinancialMap,
+  calculateOrderFinancials,
+  type CompletedReturnFinancialRow,
+  type OrderFinancialSummary,
+} from '@/lib/order-financials';
 import LogoutButton from './logout-button';
+
 type DashboardOrder = {
   id: string;
   order_number: string;
   customer_name: string;
   status: string;
-  payment_status: string;
   total_amount: number | string;
   paid_amount: number | string;
   refunded_amount: number | string;
@@ -47,6 +53,7 @@ function getOrderStatusStyles(status: string) {
 
   return 'bg-amber-100 text-amber-800';
 }
+
 export default async function DashboardPage() {
   const supabase = await createClient();
 
@@ -79,42 +86,75 @@ export default async function DashboardPage() {
     );
   }
 
-  const [{ data: orderRows, error: ordersError }, { data: productRows, error: productsError }] =
-    await Promise.all([
-      supabase
-        .from('orders')
-        .select(
-          `
-        id,
-        order_number,
-        customer_name,
-        status,
-        payment_status,
-        total_amount,
-        paid_amount,
-        refunded_amount,
-        created_at
-      `
-        )
-        .eq('store_id', store.id)
-        .order('created_at', { ascending: false }),
+  const [
+    { data: orderRows, error: ordersError },
+    { data: productRows, error: productsError },
+    { data: completedReturnRows, error: returnsError },
+  ] = await Promise.all([
+    supabase
+      .from('orders')
+      .select(
+        `
+          id,
+          order_number,
+          customer_name,
+          status,
+          total_amount,
+          paid_amount,
+          refunded_amount,
+          created_at
+        `
+      )
+      .eq('store_id', store.id)
+      .order('created_at', { ascending: false }),
 
-      supabase.from('products').select('id, status, stock_quantity').eq('store_id', store.id),
-    ]);
+    supabase.from('products').select('id, status, stock_quantity').eq('store_id', store.id),
+
+    supabase
+      .from('returns')
+      .select(
+        `
+          order_id,
+          return_value,
+          refund_amount
+        `
+      )
+      .eq('store_id', store.id)
+      .eq('status', 'completed'),
+  ]);
 
   const orders = (orderRows ?? []) as DashboardOrder[];
   const products = (productRows ?? []) as DashboardProduct[];
+
+  const completedReturns = (completedReturnRows ?? []) as CompletedReturnFinancialRow[];
+
+  const returnFinancialMap = buildReturnFinancialMap(completedReturns);
+
+  const financialsByOrder = new Map<string, OrderFinancialSummary>();
+
+  for (const order of orders) {
+    financialsByOrder.set(
+      order.id,
+      calculateOrderFinancials(
+        {
+          status: order.status,
+          total_amount: order.total_amount,
+          paid_amount: order.paid_amount,
+          refunded_amount: order.refunded_amount,
+        },
+        returnFinancialMap.get(order.id)
+      )
+    );
+  }
 
   const totalOrders = orders.length;
 
   const pendingOrders = orders.filter((order) => order.status === 'pending').length;
 
   const revenue = orders.reduce((total, order) => {
-    if (order.status === 'cancelled' || order.status === 'returned') {
-      return total;
-    }
+    const financials = financialsByOrder.get(order.id);
 
-    return total + Math.max(Number(order.paid_amount || 0) - Number(order.refunded_amount || 0), 0);
+    return total + (financials?.recognizedRevenue ?? 0);
   }, 0);
 
   const availableProducts = products.filter(
@@ -123,7 +163,8 @@ export default async function DashboardPage() {
 
   const recentOrders = orders.slice(0, 5);
 
-  const dashboardError = ordersError?.message || productsError?.message || '';
+  const dashboardError =
+    ordersError?.message || productsError?.message || returnsError?.message || '';
 
   const storeName = store.name;
 
@@ -202,12 +243,12 @@ export default async function DashboardPage() {
               Inventory
             </Link>
 
-            <div
-              className="cursor-not-allowed rounded-xl px-4 py-3 text-[#A0A29E]"
-              title="Coming soon"
+            <Link
+              href="/dashboard/returns"
+              className="block rounded-xl px-4 py-3 text-[#434640] transition hover:bg-[#F3F2EE]"
             >
               Returns
-            </div>
+            </Link>
           </nav>
         </aside>
 
@@ -220,8 +261,8 @@ export default async function DashboardPage() {
             <h1 className="mt-3 text-4xl font-black tracking-[-0.045em]">Welcome, {fullName}.</h1>
 
             <p className="mt-3 text-sm leading-7 text-[#666963]">
-              Your seller account is connected successfully. We will now add products, orders and
-              real business data.
+              Your seller account is connected successfully. Review orders, products, customers,
+              inventory and returns from one place.
             </p>
           </div>
 
@@ -247,7 +288,7 @@ export default async function DashboardPage() {
                   <h2 className="text-lg font-black">Recent orders</h2>
 
                   <p className="mt-1 text-sm text-[#777A75]">
-                    New customer orders will appear here.
+                    Recent orders with return-adjusted values.
                   </p>
                 </div>
               </div>
@@ -270,37 +311,55 @@ export default async function DashboardPage() {
                 </div>
               ) : (
                 <div className="divide-y divide-[#E2E0DA]">
-                  {recentOrders.map((order) => (
-                    <div
-                      key={order.id}
-                      className="flex flex-col gap-4 py-4 first:pt-5 sm:flex-row sm:items-center sm:justify-between"
-                    >
-                      <div>
-                        <p className="text-sm font-black">{order.order_number}</p>
+                  {recentOrders.map((order) => {
+                    const financials = financialsByOrder.get(order.id);
 
-                        <p className="mt-1 text-xs text-[#777A75]">{order.customer_name}</p>
+                    if (!financials) {
+                      return null;
+                    }
+
+                    return (
+                      <div
+                        key={order.id}
+                        className="flex flex-col gap-4 py-4 first:pt-5 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div>
+                          <p className="text-sm font-black">{order.order_number}</p>
+
+                          <p className="mt-1 text-xs text-[#777A75]">{order.customer_name}</p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-3">
+                          <div className="text-right">
+                            <strong className="text-sm">
+                              {formatCurrency(financials.effectiveTotal)}
+                            </strong>
+
+                            {financials.completedReturnValue > 0 && (
+                              <p className="mt-1 text-[11px] font-semibold text-[#2F6C5B]">
+                                Returned {formatCurrency(financials.completedReturnValue)}
+                              </p>
+                            )}
+                          </div>
+
+                          <span
+                            className={`rounded-full px-3 py-1 text-xs font-extrabold capitalize ${getOrderStatusStyles(
+                              order.status
+                            )}`}
+                          >
+                            {order.status}
+                          </span>
+
+                          <Link
+                            href={`/dashboard/orders/${order.id}`}
+                            className="text-sm font-extrabold text-[#175B46] hover:underline"
+                          >
+                            Manage
+                          </Link>
+                        </div>
                       </div>
-
-                      <div className="flex flex-wrap items-center gap-3">
-                        <strong className="text-sm">{formatCurrency(order.total_amount)}</strong>
-
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-extrabold capitalize ${getOrderStatusStyles(
-                            order.status
-                          )}`}
-                        >
-                          {order.status}
-                        </span>
-
-                        <Link
-                          href={`/dashboard/orders/${order.id}`}
-                          className="text-sm font-extrabold text-[#175B46] hover:underline"
-                        >
-                          Manage
-                        </Link>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

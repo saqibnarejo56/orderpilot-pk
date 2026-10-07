@@ -1,6 +1,12 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import {
+  buildReturnFinancialMap,
+  calculateOrderFinancials,
+  type CompletedReturnFinancialRow,
+  type OrderFinancialSummary,
+} from '@/lib/order-financials';
 
 type OrderStatus =
   | 'pending'
@@ -19,11 +25,10 @@ type OrderRow = {
   customer_name: string;
   customer_phone: string;
   status: OrderStatus;
-  payment_status: PaymentStatus;
   payment_method: string;
   total_amount: number | string;
   paid_amount: number | string;
-  balance_due: number | string;
+  refunded_amount: number | string;
   created_at: string;
 };
 
@@ -115,27 +120,64 @@ export default async function OrdersPage() {
     );
   }
 
-  const { data: orderRows, error: ordersError } = await supabase
-    .from('orders')
-    .select(
-      `
-        id,
-        order_number,
-        customer_name,
-        customer_phone,
-        status,
-        payment_status,
-        payment_method,
-        total_amount,
-        paid_amount,
-        balance_due,
-        created_at
-      `
-    )
-    .eq('store_id', store.id)
-    .order('created_at', { ascending: false });
+  const [
+    { data: orderRows, error: ordersError },
+    { data: completedReturnRows, error: returnsError },
+  ] = await Promise.all([
+    supabase
+      .from('orders')
+      .select(
+        `
+          id,
+          order_number,
+          customer_name,
+          customer_phone,
+          status,
+          payment_method,
+          total_amount,
+          paid_amount,
+          refunded_amount,
+          created_at
+        `
+      )
+      .eq('store_id', store.id)
+      .order('created_at', { ascending: false }),
+
+    supabase
+      .from('returns')
+      .select(
+        `
+          order_id,
+          return_value,
+          refund_amount
+        `
+      )
+      .eq('store_id', store.id)
+      .eq('status', 'completed'),
+  ]);
 
   const orders = (orderRows ?? []) as OrderRow[];
+
+  const completedReturns = (completedReturnRows ?? []) as CompletedReturnFinancialRow[];
+
+  const returnFinancialMap = buildReturnFinancialMap(completedReturns);
+
+  const financialsByOrder = new Map<string, OrderFinancialSummary>();
+
+  for (const order of orders) {
+    financialsByOrder.set(
+      order.id,
+      calculateOrderFinancials(
+        {
+          status: order.status,
+          total_amount: order.total_amount,
+          paid_amount: order.paid_amount,
+          refunded_amount: order.refunded_amount,
+        },
+        returnFinancialMap.get(order.id)
+      )
+    );
+  }
 
   const totalOrders = orders.length;
 
@@ -146,12 +188,12 @@ export default async function OrdersPage() {
   const deliveredOrders = orders.filter((order) => order.status === 'delivered').length;
 
   const outstandingBalance = orders.reduce((total, order) => {
-    if (order.status === 'cancelled' || order.status === 'returned') {
-      return total;
-    }
+    const financials = financialsByOrder.get(order.id);
 
-    return total + Number(order.balance_due || 0);
+    return total + (financials?.outstandingBalance ?? 0);
   }, 0);
+
+  const pageError = ordersError?.message || returnsError?.message || '';
 
   return (
     <main className="min-h-screen bg-[#F6F5F1] text-[#17191C]">
@@ -192,7 +234,8 @@ export default async function OrdersPage() {
             <h1 className="mt-3 text-4xl font-black tracking-[-0.045em] sm:text-5xl">Orders</h1>
 
             <p className="mt-3 max-w-2xl text-sm leading-7 text-[#666963]">
-              Manage customer orders, payments, fulfilment status and outstanding balances.
+              Manage customer orders, payments, fulfilment status and return-adjusted outstanding
+              balances.
             </p>
           </div>
 
@@ -235,13 +278,11 @@ export default async function OrdersPage() {
             </p>
           </div>
 
-          {ordersError ? (
+          {pageError ? (
             <div className="px-6 py-16 text-center">
               <p className="text-sm font-black text-red-700">Orders could not be loaded</p>
 
-              <p className="mt-2 text-sm text-[#777A75]">
-                Check your orders table and Row Level Security policies.
-              </p>
+              <p className="mt-2 text-sm text-[#777A75]">{pageError}</p>
             </div>
           ) : orders.length === 0 ? (
             <div className="flex min-h-80 items-center justify-center px-6 py-16 text-center">
@@ -296,72 +337,83 @@ export default async function OrdersPage() {
                 </thead>
 
                 <tbody>
-                  {orders.map((order) => (
-                    <tr key={order.id} className="border-b border-[#ECEAE5] last:border-b-0">
-                      <td className="px-6 py-5">
-                        <p className="font-black">{order.order_number}</p>
+                  {orders.map((order) => {
+                    const financials = financialsByOrder.get(order.id);
 
-                        <p className="mt-1 text-xs text-[#777A75]">
-                          {new Intl.DateTimeFormat('en-PK', {
-                            dateStyle: 'medium',
-                            timeStyle: 'short',
-                          }).format(new Date(order.created_at))}
-                        </p>
-                      </td>
+                    if (!financials) {
+                      return null;
+                    }
 
-                      <td className="px-4 py-5">
-                        <p className="text-sm font-black">{order.customer_name}</p>
+                    return (
+                      <tr key={order.id} className="border-b border-[#ECEAE5] last:border-b-0">
+                        <td className="px-6 py-5">
+                          <p className="font-black">{order.order_number}</p>
 
-                        <p className="mt-1 text-xs text-[#777A75]">{order.customer_phone}</p>
-                      </td>
+                          <p className="mt-1 text-xs text-[#777A75]">
+                            {new Intl.DateTimeFormat('en-PK', {
+                              dateStyle: 'medium',
+                              timeStyle: 'short',
+                            }).format(new Date(order.created_at))}
+                          </p>
+                        </td>
 
-                      <td className="px-4 py-5">
-                        <p className="text-sm font-black">{formatCurrency(order.total_amount)}</p>
+                        <td className="px-4 py-5">
+                          <p className="text-sm font-black">{order.customer_name}</p>
 
-                        <p className="mt-1 text-xs text-[#777A75]">
-                          Due:{' '}
-                          {formatCurrency(
-                            order.status === 'cancelled' || order.status === 'returned'
-                              ? 0
-                              : order.balance_due
+                          <p className="mt-1 text-xs text-[#777A75]">{order.customer_phone}</p>
+                        </td>
+
+                        <td className="px-4 py-5">
+                          <p className="text-sm font-black">
+                            {formatCurrency(financials.effectiveTotal)}
+                          </p>
+
+                          {financials.completedReturnValue > 0 && (
+                            <p className="mt-1 text-xs text-[#2F6C5B]">
+                              Returned: {formatCurrency(financials.completedReturnValue)}
+                            </p>
                           )}
-                        </p>
-                      </td>
 
-                      <td className="px-4 py-5">
-                        <span
-                          className={`inline-flex rounded-full px-3 py-1.5 text-xs font-extrabold capitalize ${getPaymentStatusStyles(
-                            order.payment_status
-                          )}`}
-                        >
-                          {order.payment_status}
-                        </span>
+                          <p className="mt-1 text-xs text-[#777A75]">
+                            Due: {formatCurrency(financials.outstandingBalance)}
+                          </p>
+                        </td>
 
-                        <p className="mt-2 text-xs capitalize text-[#777A75]">
-                          {order.payment_method.replaceAll('_', ' ')}
-                        </p>
-                      </td>
+                        <td className="px-4 py-5">
+                          <span
+                            className={`inline-flex rounded-full px-3 py-1.5 text-xs font-extrabold capitalize ${getPaymentStatusStyles(
+                              financials.displayPaymentStatus
+                            )}`}
+                          >
+                            {financials.displayPaymentStatus}
+                          </span>
 
-                      <td className="px-4 py-5">
-                        <span
-                          className={`inline-flex rounded-full px-3 py-1.5 text-xs font-extrabold capitalize ${getOrderStatusStyles(
-                            order.status
-                          )}`}
-                        >
-                          {order.status}
-                        </span>
-                      </td>
+                          <p className="mt-2 text-xs capitalize text-[#777A75]">
+                            {order.payment_method.replaceAll('_', ' ')}
+                          </p>
+                        </td>
 
-                      <td className="px-6 py-5 text-right">
-                        <Link
-                          href={`/dashboard/orders/${order.id}`}
-                          className="text-sm font-extrabold text-[#175B46] hover:underline"
-                        >
-                          Manage
-                        </Link>
-                      </td>
-                    </tr>
-                  ))}
+                        <td className="px-4 py-5">
+                          <span
+                            className={`inline-flex rounded-full px-3 py-1.5 text-xs font-extrabold capitalize ${getOrderStatusStyles(
+                              order.status
+                            )}`}
+                          >
+                            {order.status}
+                          </span>
+                        </td>
+
+                        <td className="px-6 py-5 text-right">
+                          <Link
+                            href={`/dashboard/orders/${order.id}`}
+                            className="text-sm font-extrabold text-[#175B46] hover:underline"
+                          >
+                            Manage
+                          </Link>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

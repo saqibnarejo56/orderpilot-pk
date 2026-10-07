@@ -1,6 +1,12 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import {
+  buildReturnFinancialMap,
+  calculateOrderFinancials,
+  type CompletedReturnFinancialRow,
+  type OrderFinancialSummary,
+} from '@/lib/order-financials';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -35,12 +41,10 @@ type CustomerOrderRow = {
   id: string;
   order_number: string;
   status: OrderStatus;
-  payment_status: PaymentStatus;
   payment_method: string;
   total_amount: number | string;
   paid_amount: number | string;
   refunded_amount: number | string;
-  balance_due: number | string;
   created_at: string;
 };
 
@@ -170,19 +174,19 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
     .from('customers')
     .select(
       `
-          id,
-          store_id,
-          name,
-          phone,
-          email,
-          city,
-          address,
-          notes,
-          first_order_at,
-          last_order_at,
-          created_at,
-          updated_at
-        `
+        id,
+        store_id,
+        name,
+        phone,
+        email,
+        city,
+        address,
+        notes,
+        first_order_at,
+        last_order_at,
+        created_at,
+        updated_at
+      `
     )
     .eq('id', id)
     .eq('store_id', store.id)
@@ -217,51 +221,93 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
 
   const customer = customerRow as CustomerRow;
 
-  const { data: orderRows, error: ordersError } = await supabase
-    .from('orders')
-    .select(
-      `
+  const [
+    { data: orderRows, error: ordersError },
+    { data: completedReturnRows, error: returnsError },
+  ] = await Promise.all([
+    supabase
+      .from('orders')
+      .select(
+        `
           id,
           order_number,
           status,
-          payment_status,
           payment_method,
           total_amount,
           paid_amount,
           refunded_amount,
-          balance_due,
           created_at
         `
-    )
-    .eq('store_id', store.id)
-    .eq('customer_id', customer.id)
-    .order('created_at', { ascending: false });
+      )
+      .eq('store_id', store.id)
+      .eq('customer_id', customer.id)
+      .order('created_at', { ascending: false }),
+
+    supabase
+      .from('returns')
+      .select(
+        `
+          order_id,
+          return_value,
+          refund_amount
+        `
+      )
+      .eq('store_id', store.id)
+      .eq('status', 'completed'),
+  ]);
 
   const orders = (orderRows ?? []) as CustomerOrderRow[];
 
-  const validOrders = orders.filter(
-    (order) => order.status !== 'cancelled' && order.status !== 'returned'
-  );
+  const completedReturns = (completedReturnRows ?? []) as CompletedReturnFinancialRow[];
+
+  const returnFinancialMap = buildReturnFinancialMap(completedReturns);
+
+  const financialsByOrder = new Map<string, OrderFinancialSummary>();
+
+  for (const order of orders) {
+    financialsByOrder.set(
+      order.id,
+      calculateOrderFinancials(
+        {
+          status: order.status,
+          total_amount: order.total_amount,
+          paid_amount: order.paid_amount,
+          refunded_amount: order.refunded_amount,
+        },
+        returnFinancialMap.get(order.id)
+      )
+    );
+  }
 
   const totalOrders = orders.length;
 
   const deliveredOrders = orders.filter((order) => order.status === 'delivered').length;
 
-  const totalOrderValue = validOrders.reduce(
-    (total, order) => total + Number(order.total_amount || 0),
-    0
-  );
+  const totalOrderValue = orders.reduce((total, order) => {
+    const financials = financialsByOrder.get(order.id);
 
-  const totalCollected = validOrders.reduce(
-    (total, order) =>
-      total + Math.max(Number(order.paid_amount || 0) - Number(order.refunded_amount || 0), 0),
-    0
-  );
+    return total + (financials?.effectiveTotal ?? 0);
+  }, 0);
 
-  const totalOutstanding = validOrders.reduce(
-    (total, order) => total + Number(order.balance_due || 0),
-    0
-  );
+  const totalCollected = orders.reduce((total, order) => {
+    const financials = financialsByOrder.get(order.id);
+
+    return total + (financials?.netCollected ?? 0);
+  }, 0);
+
+  const totalOutstanding = orders.reduce((total, order) => {
+    const financials = financialsByOrder.get(order.id);
+
+    return total + (financials?.outstandingBalance ?? 0);
+  }, 0);
+
+  const totalCustomerCredit = orders.reduce((total, order) => {
+    const financials = financialsByOrder.get(order.id);
+
+    return total + (financials?.customerCredit ?? 0);
+  }, 0);
+
+  const pageError = ordersError?.message || returnsError?.message || '';
 
   return (
     <main className="min-h-screen bg-[#F6F5F1] text-[#17191C]">
@@ -304,7 +350,7 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
             </h1>
 
             <p className="mt-3 max-w-2xl text-sm leading-7 text-[#666963]">
-              Review this customer&apos;s contact details, payment activity, outstanding balance and
+              Review return-adjusted customer value, payment activity, outstanding balance and
               complete order history.
             </p>
           </div>
@@ -422,18 +468,18 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
             </p>
 
             <h2 className="mt-4 text-2xl font-black tracking-[-0.035em]">
-              Payment and order summary
+              Return-adjusted financial summary
             </h2>
 
             <div className="mt-8 space-y-5">
               <div className="flex items-center justify-between gap-5">
-                <span className="text-sm text-[#D3E1DC]">Total order value</span>
+                <span className="text-sm text-[#D3E1DC]">Effective order value</span>
 
                 <strong className="text-lg">{formatCurrency(totalOrderValue)}</strong>
               </div>
 
               <div className="flex items-center justify-between gap-5">
-                <span className="text-sm text-[#D3E1DC]">Amount collected</span>
+                <span className="text-sm text-[#D3E1DC]">Net collected</span>
 
                 <strong className="text-lg">{formatCurrency(totalCollected)}</strong>
               </div>
@@ -444,10 +490,17 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
                 <strong className="text-lg">{formatCurrency(totalOutstanding)}</strong>
               </div>
 
+              <div className="flex items-center justify-between gap-5 rounded-xl bg-white/10 px-4 py-3">
+                <span className="text-sm font-bold text-amber-200">Customer credit</span>
+
+                <strong className="text-lg text-amber-200">
+                  {formatCurrency(totalCustomerCredit)}
+                </strong>
+              </div>
+
               <div className="border-t border-white/15 pt-5">
                 <p className="text-xs leading-6 text-[#B9D2C9]">
-                  Cancelled and returned orders are excluded from customer value and outstanding
-                  totals.
+                  Completed return value and recorded return refunds are included in these totals.
                 </p>
               </div>
             </div>
@@ -459,7 +512,9 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
             <div>
               <h2 className="text-lg font-black">Order history</h2>
 
-              <p className="mt-1 text-sm text-[#777A75]">All orders linked to {customer.name}.</p>
+              <p className="mt-1 text-sm text-[#777A75]">
+                All orders linked to {customer.name}, adjusted for completed returns.
+              </p>
             </div>
 
             <p className="text-xs font-bold text-[#777A75]">
@@ -467,13 +522,11 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
             </p>
           </div>
 
-          {ordersError ? (
+          {pageError ? (
             <div className="px-6 py-16 text-center">
               <p className="text-sm font-black text-red-700">Order history could not be loaded</p>
 
-              <p className="mt-2 text-sm text-[#777A75]">
-                Check the order and customer connection.
-              </p>
+              <p className="mt-2 text-sm text-[#777A75]">{pageError}</p>
             </div>
           ) : orders.length === 0 ? (
             <div className="px-6 py-16 text-center">
@@ -485,7 +538,7 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1100px] border-collapse">
+              <table className="w-full min-w-[1150px] border-collapse">
                 <thead>
                   <tr className="border-b border-[#E2E0DA] bg-[#FAFAF8] text-left">
                     <th className="px-6 py-4 text-[11px] font-extrabold tracking-[0.08em] text-[#777A75]">
@@ -501,7 +554,7 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
                     </th>
 
                     <th className="px-4 py-4 text-[11px] font-extrabold tracking-[0.08em] text-[#777A75]">
-                      PAID
+                      COLLECTED
                     </th>
 
                     <th className="px-4 py-4 text-[11px] font-extrabold tracking-[0.08em] text-[#777A75]">
@@ -524,10 +577,11 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
 
                 <tbody>
                   {orders.map((order) => {
-                    const dueAmount =
-                      order.status === 'cancelled' || order.status === 'returned'
-                        ? 0
-                        : Number(order.balance_due || 0);
+                    const financials = financialsByOrder.get(order.id);
+
+                    if (!financials) {
+                      return null;
+                    }
 
                     return (
                       <tr key={order.id} className="border-b border-[#ECEAE5] last:border-b-0">
@@ -543,25 +597,41 @@ export default async function CustomerDetailPage({ params }: CustomerDetailPageP
                           {formatDateTime(order.created_at)}
                         </td>
 
-                        <td className="px-4 py-5 text-sm font-black">
-                          {formatCurrency(order.total_amount)}
+                        <td className="px-4 py-5">
+                          <p className="text-sm font-black">
+                            {formatCurrency(financials.effectiveTotal)}
+                          </p>
+
+                          {financials.completedReturnValue > 0 && (
+                            <p className="mt-1 text-xs font-semibold text-[#2F6C5B]">
+                              Returned: {formatCurrency(financials.completedReturnValue)}
+                            </p>
+                          )}
+                        </td>
+
+                        <td className="px-4 py-5">
+                          <p className="text-sm font-black">
+                            {formatCurrency(financials.netCollected)}
+                          </p>
+
+                          {financials.customerCredit > 0 && (
+                            <p className="mt-1 text-xs font-bold text-[#2F6C5B]">
+                              Credit: {formatCurrency(financials.customerCredit)}
+                            </p>
+                          )}
                         </td>
 
                         <td className="px-4 py-5 text-sm font-black">
-                          {formatCurrency(order.paid_amount)}
-                        </td>
-
-                        <td className="px-4 py-5 text-sm font-black">
-                          {formatCurrency(dueAmount)}
+                          {formatCurrency(financials.outstandingBalance)}
                         </td>
 
                         <td className="px-4 py-5">
                           <span
                             className={`inline-flex rounded-full px-3 py-1.5 text-xs font-extrabold capitalize ${getPaymentStatusStyles(
-                              order.payment_status
+                              financials.displayPaymentStatus
                             )}`}
                           >
-                            {order.payment_status}
+                            {financials.displayPaymentStatus}
                           </span>
                         </td>
 
