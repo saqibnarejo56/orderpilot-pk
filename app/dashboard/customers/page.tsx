@@ -1,6 +1,12 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import {
+  buildReturnFinancialMap,
+  calculateOrderFinancials,
+  type CompletedReturnFinancialRow,
+  type OrderFinancialSummary,
+} from '@/lib/order-financials';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -23,7 +29,6 @@ type CustomerOrderRow = {
   status: string;
   total_amount: number | string;
   paid_amount: number | string;
-  balance_due: number | string;
   refunded_amount: number | string;
   created_at: string;
 };
@@ -33,6 +38,7 @@ type CustomerSummary = CustomerRow & {
   totalOrderValue: number;
   collectedAmount: number;
   outstandingBalance: number;
+  customerCredit: number;
   lastOrderAt: string | null;
 };
 
@@ -96,12 +102,15 @@ export default async function CustomersPage() {
     );
   }
 
-  const [{ data: customerRows, error: customersError }, { data: orderRows, error: ordersError }] =
-    await Promise.all([
-      supabase
-        .from('customers')
-        .select(
-          `
+  const [
+    { data: customerRows, error: customersError },
+    { data: orderRows, error: ordersError },
+    { data: completedReturnRows, error: returnsError },
+  ] = await Promise.all([
+    supabase
+      .from('customers')
+      .select(
+        `
           id,
           name,
           phone,
@@ -112,30 +121,62 @@ export default async function CustomersPage() {
           last_order_at,
           created_at
         `
-        )
-        .eq('store_id', store.id)
-        .order('created_at', { ascending: false }),
+      )
+      .eq('store_id', store.id)
+      .order('created_at', { ascending: false }),
 
-      supabase
-        .from('orders')
-        .select(
-          `
+    supabase
+      .from('orders')
+      .select(
+        `
           id,
           customer_id,
           status,
           total_amount,
           paid_amount,
-          balance_due,
           refunded_amount,
           created_at
         `
-        )
-        .eq('store_id', store.id)
-        .order('created_at', { ascending: false }),
-    ]);
+      )
+      .eq('store_id', store.id)
+      .order('created_at', { ascending: false }),
+
+    supabase
+      .from('returns')
+      .select(
+        `
+          order_id,
+          return_value,
+          refund_amount
+        `
+      )
+      .eq('store_id', store.id)
+      .eq('status', 'completed'),
+  ]);
 
   const customers = (customerRows ?? []) as CustomerRow[];
   const orders = (orderRows ?? []) as CustomerOrderRow[];
+
+  const completedReturns = (completedReturnRows ?? []) as CompletedReturnFinancialRow[];
+
+  const returnFinancialMap = buildReturnFinancialMap(completedReturns);
+
+  const financialsByOrder = new Map<string, OrderFinancialSummary>();
+
+  for (const order of orders) {
+    financialsByOrder.set(
+      order.id,
+      calculateOrderFinancials(
+        {
+          status: order.status,
+          total_amount: order.total_amount,
+          paid_amount: order.paid_amount,
+          refunded_amount: order.refunded_amount,
+        },
+        returnFinancialMap.get(order.id)
+      )
+    );
+  }
 
   const ordersByCustomer = new Map<string, CustomerOrderRow[]>();
 
@@ -145,6 +186,7 @@ export default async function CustomersPage() {
     }
 
     const existingOrders = ordersByCustomer.get(order.customer_id) ?? [];
+
     existingOrders.push(order);
     ordersByCustomer.set(order.customer_id, existingOrders);
   }
@@ -153,25 +195,29 @@ export default async function CustomersPage() {
     .map((customer) => {
       const customerOrders = ordersByCustomer.get(customer.id) ?? [];
 
-      const validOrders = customerOrders.filter(
-        (order) => order.status !== 'cancelled' && order.status !== 'returned'
-      );
+      const totalOrderValue = customerOrders.reduce((total, order) => {
+        const financials = financialsByOrder.get(order.id);
 
-      const totalOrderValue = validOrders.reduce(
-        (total, order) => total + Number(order.total_amount || 0),
-        0
-      );
+        return total + (financials?.effectiveTotal ?? 0);
+      }, 0);
 
-      const collectedAmount = validOrders.reduce(
-        (total, order) =>
-          total + Math.max(Number(order.paid_amount || 0) - Number(order.refunded_amount || 0), 0),
-        0
-      );
+      const collectedAmount = customerOrders.reduce((total, order) => {
+        const financials = financialsByOrder.get(order.id);
 
-      const outstandingBalance = validOrders.reduce(
-        (total, order) => total + Number(order.balance_due || 0),
-        0
-      );
+        return total + (financials?.netCollected ?? 0);
+      }, 0);
+
+      const outstandingBalance = customerOrders.reduce((total, order) => {
+        const financials = financialsByOrder.get(order.id);
+
+        return total + (financials?.outstandingBalance ?? 0);
+      }, 0);
+
+      const customerCredit = customerOrders.reduce((total, order) => {
+        const financials = financialsByOrder.get(order.id);
+
+        return total + (financials?.customerCredit ?? 0);
+      }, 0);
 
       const latestOrder = customerOrders[0];
 
@@ -181,6 +227,7 @@ export default async function CustomersPage() {
         totalOrderValue,
         collectedAmount,
         outstandingBalance,
+        customerCredit,
         lastOrderAt: latestOrder?.created_at ?? customer.last_order_at,
       };
     })
@@ -210,7 +257,7 @@ export default async function CustomersPage() {
     0
   );
 
-  const pageError = customersError?.message || ordersError?.message || '';
+  const pageError = customersError?.message || ordersError?.message || returnsError?.message || '';
 
   return (
     <main className="min-h-screen bg-[#F6F5F1] text-[#17191C]">
@@ -251,8 +298,8 @@ export default async function CustomersPage() {
             <h1 className="mt-3 text-4xl font-black tracking-[-0.045em] sm:text-5xl">Customers</h1>
 
             <p className="mt-3 max-w-2xl text-sm leading-7 text-[#666963]">
-              View customer activity, order history, collected payments and outstanding balances
-              from one place.
+              View return-adjusted customer activity, order value, collected payments and
+              outstanding balances from one place.
             </p>
           </div>
 
@@ -299,9 +346,7 @@ export default async function CustomersPage() {
             <div className="px-6 py-16 text-center">
               <p className="text-sm font-black text-red-700">Customers could not be loaded</p>
 
-              <p className="mt-2 text-sm text-[#777A75]">
-                Check the customers table, order connection and Row Level Security policies.
-              </p>
+              <p className="mt-2 text-sm text-[#777A75]">{pageError}</p>
             </div>
           ) : customerSummaries.length === 0 ? (
             <div className="flex min-h-80 items-center justify-center px-6 py-16 text-center">
@@ -388,8 +433,14 @@ export default async function CustomersPage() {
 
                       <td className="px-4 py-5 text-sm font-black">{customer.orderCount}</td>
 
-                      <td className="px-4 py-5 text-sm font-black">
-                        {formatCurrency(customer.totalOrderValue)}
+                      <td className="px-4 py-5">
+                        <p className="text-sm font-black">
+                          {formatCurrency(customer.totalOrderValue)}
+                        </p>
+
+                        <p className="mt-1 text-xs text-[#777A75]">
+                          Collected: {formatCurrency(customer.collectedAmount)}
+                        </p>
                       </td>
 
                       <td className="px-4 py-5">
@@ -402,6 +453,12 @@ export default async function CustomersPage() {
                         >
                           {formatCurrency(customer.outstandingBalance)}
                         </span>
+
+                        {customer.customerCredit > 0 && (
+                          <p className="mt-2 text-xs font-bold text-[#2F6C5B]">
+                            Credit: {formatCurrency(customer.customerCredit)}
+                          </p>
+                        )}
                       </td>
 
                       <td className="px-4 py-5 text-sm font-semibold text-[#555852]">

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import { calculateOrderFinancials } from '@/lib/order-financials';
 
 type OrderStatus =
   | 'pending'
@@ -73,6 +74,25 @@ type EditableOrderItem = {
   isUnavailable: boolean;
 };
 
+type ReturnWorkflowStatus =
+  | 'requested'
+  | 'approved'
+  | 'rejected'
+  | 'completed';
+
+type ReturnWorkflowRow = {
+  id: string;
+  status: ReturnWorkflowStatus;
+  return_value: number | string;
+  refund_amount: number | string;
+};
+
+type ReturnWorkflowItemRow = {
+  return_id: string;
+  quantity: number;
+  restock: boolean;
+};
+
 function formatCurrency(value: number | string) {
   return new Intl.NumberFormat('en-PK', {
     style: 'currency',
@@ -130,17 +150,18 @@ function getAllowedOrderStatuses(currentStatus: OrderStatus): OrderStatus[] {
   }
 
   if (currentStatus === 'shipped') {
-    return ['shipped', 'delivered', 'returned'];
+    return ['shipped', 'delivered'];
   }
 
   if (currentStatus === 'delivered') {
-    return ['delivered', 'returned'];
+    return ['delivered'];
   }
 
   if (currentStatus === 'cancelled') {
     return ['cancelled', 'pending'];
   }
 
+  // Existing legacy returned records remain readable.
   return ['returned'];
 }
 
@@ -161,7 +182,7 @@ export default function ManageOrderPage() {
 
   const [status, setStatus] = useState<OrderStatus>('pending');
 
-  const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('unpaid');
+  const [, setPaymentStatus] = useState<PaymentStatus>('unpaid');
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cod');
 
@@ -188,6 +209,12 @@ export default function ManageOrderPage() {
   const [loadError, setLoadError] = useState('');
   const [formError, setFormError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+
+  const [completedReturnValue, setCompletedReturnValue] = useState(0);
+  const [dedicatedReturnRefund, setDedicatedReturnRefund] = useState(0);
+  const [activeReturnUnits, setActiveReturnUnits] = useState(0);
+  const [completedRestockUnits, setCompletedRestockUnits] = useState(0);
+  const [returnRecordCount, setReturnRecordCount] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -289,6 +316,88 @@ export default function ManageOrderPage() {
 
         const availableProducts = (productRows ?? []) as ProductOption[];
         const loadedItems = (itemRows ?? []) as OrderItemRow[];
+
+        const { data: returnRows, error: returnsError } = await supabase
+          .from('returns')
+          .select(
+            `
+              id,
+              status,
+              return_value,
+              refund_amount
+            `
+          )
+          .eq('order_id', orderId);
+
+        if (returnsError) {
+          throw new Error(returnsError.message);
+        }
+
+        const orderReturns = (returnRows ?? []) as ReturnWorkflowRow[];
+
+        const activeReturns = orderReturns.filter((returnRecord) =>
+          ['requested', 'approved', 'completed'].includes(returnRecord.status)
+        );
+
+        const completedReturns = orderReturns.filter(
+          (returnRecord) => returnRecord.status === 'completed'
+        );
+
+        const activeReturnIds = activeReturns.map(
+          (returnRecord) => returnRecord.id
+        );
+
+        const completedReturnIds = new Set(
+          completedReturns.map((returnRecord) => returnRecord.id)
+        );
+
+        let activeUnits = 0;
+        let restockedUnits = 0;
+
+        if (activeReturnIds.length > 0) {
+          const { data: returnItemRows, error: returnItemsError } =
+            await supabase
+              .from('return_items')
+              .select(
+                `
+                  return_id,
+                  quantity,
+                  restock
+                `
+              )
+              .in('return_id', activeReturnIds);
+
+          if (returnItemsError) {
+            throw new Error(returnItemsError.message);
+          }
+
+          const workflowItems = (returnItemRows ?? []) as ReturnWorkflowItemRow[];
+
+          for (const returnItem of workflowItems) {
+            const quantity = Number(returnItem.quantity || 0);
+
+            activeUnits += quantity;
+
+            if (
+              completedReturnIds.has(returnItem.return_id) &&
+              returnItem.restock
+            ) {
+              restockedUnits += quantity;
+            }
+          }
+        }
+
+        const completedValue = completedReturns.reduce(
+          (total, returnRecord) =>
+            total + Number(returnRecord.return_value || 0),
+          0
+        );
+
+        const completedRefunds = completedReturns.reduce(
+          (total, returnRecord) =>
+            total + Number(returnRecord.refund_amount || 0),
+          0
+        );
         setOrderNumber(order.order_number);
         setCustomerName(order.customer_name);
         setCustomerPhone(order.customer_phone);
@@ -311,6 +420,12 @@ export default function ManageOrderPage() {
         setUpdatedAt(order.updated_at);
         setProducts(availableProducts);
         setItems(loadedItems);
+
+        setCompletedReturnValue(completedValue);
+        setDedicatedReturnRefund(completedRefunds);
+        setActiveReturnUnits(activeUnits);
+        setCompletedRestockUnits(restockedUnits);
+        setReturnRecordCount(orderReturns.length);
 
         setEditableItems(
           loadedItems.map((item) => {
@@ -370,11 +485,45 @@ export default function ManageOrderPage() {
     [effectiveSubtotal, deliveryNumber, discountNumber]
   );
 
-  const balanceDue = useMemo(
-    () => Math.max(totalAmount - paidNumber, 0),
-    [totalAmount, paidNumber]
+  const totalOrderedUnits = useMemo(
+    () =>
+      items.reduce(
+        (total, item) => total + Number(item.quantity || 0),
+        0
+      ),
+    [items]
   );
-  const displayedBalanceDue = status === 'cancelled' || status === 'returned' ? 0 : balanceDue;
+
+  const returnableUnits = Math.max(
+    totalOrderedUnits - activeReturnUnits,
+    0
+  );
+
+  const financials = useMemo(
+    () =>
+      calculateOrderFinancials(
+        {
+          status,
+          total_amount: totalAmount,
+          paid_amount: paidNumber,
+          refunded_amount: refundedNumber,
+        },
+        {
+          completedReturnValue,
+          dedicatedReturnRefund,
+        }
+      ),
+    [
+      status,
+      totalAmount,
+      paidNumber,
+      refundedNumber,
+      completedReturnValue,
+      dedicatedReturnRefund,
+    ]
+  );
+
+  const displayedBalanceDue = financials.outstandingBalance;
   function markItemsChanged(nextItems: EditableOrderItem[]) {
     setEditableItems(nextItems);
     setItemsDirty(true);
@@ -941,6 +1090,57 @@ export default function ManageOrderPage() {
           </p>
         </section>
 
+        {(persistedStatus === 'shipped' || persistedStatus === 'delivered') && (
+          returnableUnits > 0 ? (
+            <section className="mb-6 flex flex-col gap-4 rounded-2xl border border-[#CFE0D8] bg-[#F3F8F5] p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-xs font-extrabold tracking-[0.1em] text-[#2F6C5B]">
+                  RETURNS MANAGEMENT
+                </p>
+
+                <h2 className="mt-2 text-lg font-black">
+                  Customer returning this order?
+                </h2>
+
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-[#666963]">
+                  {returnableUnits} unit{returnableUnits === 1 ? '' : 's'} can
+                  still be added to a return request.
+                </p>
+              </div>
+
+              <Link
+                href={`/dashboard/returns/new?order=${orderId}`}
+                className="inline-flex h-12 shrink-0 items-center justify-center rounded-xl bg-[#173F36] px-5 text-sm font-extrabold text-white transition hover:bg-[#0F3029]"
+              >
+                Create return
+              </Link>
+            </section>
+          ) : (
+            <section className="mb-6 rounded-2xl border border-[#D8DFDB] bg-[#F4F6F4] p-5">
+              <p className="text-xs font-extrabold tracking-[0.1em] text-[#2F6C5B]">
+                RETURNS MANAGEMENT
+              </p>
+
+              <h2 className="mt-2 text-lg font-black">
+                No units available for another return
+              </h2>
+
+              <p className="mt-2 text-sm leading-6 text-[#666963]">
+                All {totalOrderedUnits} ordered unit
+                {totalOrderedUnits === 1 ? '' : 's'} are already included in
+                requested, approved or completed returns.
+              </p>
+
+              <Link
+                href="/dashboard/returns"
+                className="mt-4 inline-flex text-sm font-extrabold text-[#175B46] hover:underline"
+              >
+                View return history
+              </Link>
+            </section>
+          )
+        )}
+
         <form onSubmit={handleUpdate} className="grid gap-6 lg:grid-cols-[1fr_340px]">
           <section className="space-y-6">
             <article className="rounded-2xl border border-[#D9D7D0] bg-white p-6 sm:p-8">
@@ -1019,7 +1219,7 @@ export default function ManageOrderPage() {
                       : 'bg-amber-100 text-amber-800'
                   }`}
                 >
-                  {stockDeducted ? 'Stock deducted' : 'Stock not deducted'}
+                  {stockDeducted ? (completedRestockUnits > 0 ? `${completedRestockUnits} returned to stock` : 'Stock reserved') : 'Stock not deducted'}
                 </span>
               </div>
 
@@ -1297,8 +1497,7 @@ export default function ManageOrderPage() {
               </div>
 
               <p className="mt-4 text-xs leading-6 text-[#777A75]">
-                Confirming the order deducts stock. Moving it back to Pending, Cancelled or Returned
-                restores stock.
+                Confirming the order reserves stock. Customer returns are handled through Returns Management so returned stock is restored only once.
               </p>
             </article>
 
@@ -1324,45 +1523,96 @@ export default function ManageOrderPage() {
                 </div>
 
                 <div className="flex justify-between border-t border-white/15 pt-4">
-                  <span className="text-white/65">Total</span>
-                  <strong>{formatCurrency(totalAmount)}</strong>
+                  <span className="text-white/65">Original total</span>
+                  <strong>{formatCurrency(financials.originalTotal)}</strong>
+                </div>
+
+                {financials.completedReturnValue > 0 && (
+                  <div className="flex justify-between text-emerald-200">
+                    <span>Completed returns</span>
+
+                    <strong>
+                      -{formatCurrency(financials.completedReturnValue)}
+                    </strong>
+                  </div>
+                )}
+
+                <div className="flex justify-between border-t border-white/15 pt-4">
+                  <span className="font-bold text-white/80">
+                    Effective total
+                  </span>
+
+                  <strong className="text-lg">
+                    {formatCurrency(financials.effectiveTotal)}
+                  </strong>
                 </div>
 
                 <div className="flex justify-between">
                   <span className="text-white/65">Paid</span>
-                  <strong>{formatCurrency(paidNumber)}</strong>
+                  <strong>{formatCurrency(financials.paidAmount)}</strong>
                 </div>
-                {refundedNumber > 0 && (
-                  <div className="flex justify-between">
-                    <span className="text-white/65">Refunded</span>
 
-                    <strong>-{formatCurrency(refundedNumber)}</strong>
+                {financials.legacyRefundedAmount > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-white/65">Legacy refund</span>
+
+                    <strong>
+                      -{formatCurrency(financials.legacyRefundedAmount)}
+                    </strong>
                   </div>
                 )}
-                <div className="flex justify-between">
-                  <span className="text-white/65">Balance due</span>
 
+                {financials.dedicatedReturnRefund > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-white/65">Return refunds</span>
+
+                    <strong>
+                      -{formatCurrency(financials.dedicatedReturnRefund)}
+                    </strong>
+                  </div>
+                )}
+
+                <div className="flex justify-between">
+                  <span className="text-white/65">Net collected</span>
+                  <strong>{formatCurrency(financials.netCollected)}</strong>
+                </div>
+
+                <div className="flex justify-between border-t border-white/15 pt-4">
+                  <span className="text-white/80">Outstanding</span>
                   <strong>{formatCurrency(displayedBalanceDue)}</strong>
                 </div>
+
+                {financials.customerCredit > 0 && (
+                  <div className="flex justify-between rounded-lg bg-white/10 px-3 py-2">
+                    <span className="font-bold text-amber-200">
+                      Customer credit
+                    </span>
+
+                    <strong className="text-amber-200">
+                      {formatCurrency(financials.customerCredit)}
+                    </strong>
+                  </div>
+                )}
               </div>
 
               <div className="mt-6 border-t border-white/15 pt-4">
                 <span
                   className={`inline-flex rounded-full px-3 py-1.5 text-xs font-extrabold capitalize ${getPaymentStyles(
-                    paymentStatus
+                    financials.displayPaymentStatus
                   )}`}
                 >
-                  {paymentStatus}
+                  {financials.displayPaymentStatus}
                 </span>
               </div>
             </article>
-
             {stockDeducted && (
               <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold leading-6 text-emerald-800">
-                Product stock has been deducted for this order.
+                Original order stock was reserved successfully.
+                {completedRestockUnits > 0
+                  ? ` ${completedRestockUnits} unit(s) have since been restored through completed returns.`
+                  : ' No units have been restored through Returns Management yet.'}
               </div>
             )}
-
             {formError && (
               <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold leading-6 text-red-700">
                 {formError}
@@ -1380,15 +1630,19 @@ export default function ManageOrderPage() {
               disabled={isSaving || isDeleting || isSavingItems}
               className="flex h-13 w-full items-center justify-center rounded-xl bg-[#173F36] px-5 text-sm font-extrabold text-white disabled:opacity-60"
             >
-              {isSaving ? 'Saving order...' : 'Save changes →'}
+              {isSaving ? 'Saving order...' : 'Save changes'}
             </button>
             <button
               type="button"
               onClick={handleDeleteOrder}
-              disabled={isDeleting || isSaving || isSavingItems}
+              disabled={isDeleting || isSaving || isSavingItems || returnRecordCount > 0}
               className="flex h-13 w-full items-center justify-center rounded-xl border border-red-200 bg-red-50 px-5 text-sm font-extrabold text-red-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {isDeleting ? 'Deleting order...' : 'Delete order'}
+              {returnRecordCount > 0
+                ? 'Cannot delete order with return history'
+                : isDeleting
+                  ? 'Deleting order...'
+                  : 'Delete order'}
             </button>
             <article className="rounded-2xl border border-[#D9D7D0] bg-white p-5">
               <p className="text-xs leading-6 text-[#777A75]">
